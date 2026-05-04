@@ -1,273 +1,303 @@
 "use client";
 import { useState } from "react";
 import { Card } from "./shared";
-
-// ── Make sure this file starts here — no NAV array, no Sidebar code ───────
-
-// ── Mock AI responses keyed by keyword ────────────────────────────────────
-const AI_RESPONSES: Record<string, { answer: string; steps?: string[]; note?: string; sources: string[] }> = {
-  default: {
-    answer: "I found relevant information in your knowledge base. Here's what I know based on your SOPs and manuals.",
-    sources: ["SOP Library", "General Manual"],
-  },
-  hvac: {
-    answer: "This has happened twice before — most recently March 2023. Root cause is the pressure sensor on the secondary compressor losing calibration after cold weather exposure.",
-    steps: [
-      "Power cycle the unit — wait 90 seconds before restart",
-      "Access panel B3, check pressure sensor connector P7 for corrosion",
-      "If fault persists, call CoolTech Services (ref: CT-2891) — ask for Dave, not the general line",
-      "Part needed if replacing: Honeywell C7335A1004 (~£34, 2-day delivery)",
-    ],
-    note: "Annual HVAC inspection for Building 3 is due in 47 days — consider bundling this fix with the inspection visit.",
-    sources: ["Fault Log #2891", "HVAC SOP v3.2", "CoolTech Vendor Card"],
-  },
-  "fire alarm": {
-    answer: "Your fire alarm inspection with ABC Fire Protection is overdue. Last inspection was March 15, 2024. Certificate expires soon.",
-    steps: [
-      "Contact ABC Fire Protection at (555) 234-5678",
-      "Request annual suppression system inspection",
-      "Ensure all exit signs and emergency lights are tested",
-      "Update inspection report in Drive after completion",
-    ],
-    note: "This is a compliance requirement — reschedule immediately to avoid penalties.",
-    sources: ["Inspection Log", "Fire Safety SOP", "ABC Fire Protection Card"],
-  },
-  onboard: {
-    answer: "The guest check-in procedure has been updated recently. Here's the current onboarding flow for new clients.",
-    steps: [
-      "Greet guest and verify reservation in POS system",
-      "Collect valid photo ID and scan into system",
-      "Process payment method and obtain authorization",
-      "Issue key cards — program for room + amenity access",
-      "Provide welcome packet and explain hotel amenities",
-    ],
-    note: "GDPR step added by Mike on Apr 21 — ensure guest consents to data processing.",
-    sources: ["Guest Check-In SOP v4.1", "GDPR Policy Doc"],
-  },
-  electrician: {
-    answer: "Your emergency electrician contact is Sparks Electrical. They provide 24/7 emergency service for your property.",
-    steps: [
-      "Emergency line: (555) 987-6543 — available 24/7",
-      "Contact person: Dave Morrison (Senior Electrician)",
-      "Reference your account number: SPK-2024-441",
-      "For non-emergency work, submit request 48hrs in advance",
-    ],
-    sources: ["Vendor Card — Sparks Electrical", "Emergency Contacts SOP"],
-  },
-};
+import { CLIENT_ID } from "../../../lib/supabase";
 
 const SUGGESTED = [
-  "How do I onboard a new client?",
-  "Fire alarm inspection overdue?",
-  "Who's our emergency electrician?",
-  "Reset password for billing system",
-  "New employee checklist",
-  "Server room access procedure",
+  "air conditioning making noise",
+  "card reader not working",
+  "fire inspection overdue",
+  "new employee checklist",
+  "wifi not connecting",
+  "hot water pressure low",
 ];
 
-const ACTIVITY = [
-  { user: "Sarah", color: "#7c6af7", action: "added fault solution for Printer Offline Error on Floor 2", time: "1 hour ago" },
-  { user: "James", color: "#4ade80", action: "completed Warehouse A safety walkthrough SOP", time: "Yesterday" },
-  { user: "AI",    color: "#f97316", action: "auto-captured new vendor: Greenfield Waste Management", time: "2 days ago" },
-  { user: "Mike",  color: "#22d3ee", action: "updated Client Onboarding SOP — added GDPR step", time: "3 days ago" },
-];
-
-function getResponse(query: string) {
-  const q = query.toLowerCase();
-  if (q.includes("hvac") || q.includes("e-47") || q.includes("fault") || q.includes("noise")) return AI_RESPONSES.hvac;
-  if (q.includes("fire") || q.includes("alarm") || q.includes("suppression")) return AI_RESPONSES["fire alarm"];
-  if (q.includes("onboard") || q.includes("check-in") || q.includes("checkin")) return AI_RESPONSES.onboard;
-  if (q.includes("electrician") || q.includes("electric")) return AI_RESPONSES.electrician;
-  return AI_RESPONSES.default;
+// ── Types ──────────────────────────────────────────────────────────────────
+interface NormalResult {
+  title: string;
+  type: string;
+  excerpt: string;
 }
 
-interface Message { role: "user" | "ai"; text: string; response?: typeof AI_RESPONSES.default }
+interface AISource {
+  title: string;
+  type: string;
+  similarity: number;
+}
 
+interface AIResult {
+  answer: string;
+  sources: AISource[];
+}
+
+// ── Normal keyword search via /api/knowledge ───────────────────────────────
+async function normalSearch(q: string): Promise<NormalResult[]> {
+  const res = await fetch(`/api/knowledge?q=${encodeURIComponent(q)}&clientId=${CLIENT_ID}`);
+  const data = await res.json();
+  return (data.results ?? []).map((r: {
+    title: string;
+    source: string;
+    symptom?: string;
+    solution?: string;
+    fix?: string;
+  }) => ({
+    title:   r.title,
+    type:    r.source,
+    excerpt: r.symptom ?? r.solution ?? r.fix ?? "",
+  }));
+}
+
+// ── AI RAG search via /api/ai/ask ──────────────────────────────────────────
+async function aiSearch(q: string): Promise<AIResult> {
+  const res = await fetch("/api/ai/ask", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ question: q, clientId: CLIENT_ID }),
+  });
+  return await res.json();
+}
+
+// ── Status badge ───────────────────────────────────────────────────────────
+function TypeBadge({ type }: { type: string }) {
+  const colors: Record<string, string> = {
+    SOP:             "#7c6af7",
+    Manual:          "#22d3ee",
+    Troubleshooting: "#f97316",
+    "Fault Library": "#f43f5e",
+  };
+  return (
+    <span style={{
+      background: "#1e293b", color: colors[type] ?? "#64748b",
+      fontSize: 11, fontWeight: 700, padding: "2px 8px",
+      borderRadius: 99, border: `1px solid ${colors[type] ?? "#334155"}`,
+    }}>
+      {type}
+    </span>
+  );
+}
+
+// ── Main component ─────────────────────────────────────────────────────────
 export default function AskAIPage() {
-  const [input, setInput]     = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [query, setQuery]             = useState("");
+  const [loading, setLoading]         = useState(false);
+  const [normalResults, setNormal]    = useState<NormalResult[] | null>(null);
+  const [aiResult, setAI]             = useState<AIResult | null>(null);
+  const [searched, setSearched]       = useState("");
+  const [error, setError]             = useState("");
 
-  const handleAsk = async (query: string) => {
-    if (!query.trim()) return;
-    setMessages(prev => [...prev, { role: "user", text: query }]);
-    setInput("");
+  const handleSearch = async (q: string) => {
+    if (!q.trim()) return;
     setLoading(true);
-    await new Promise(r => setTimeout(r, 800));
-    const response = getResponse(query);
-    setMessages(prev => [...prev, { role: "ai", text: response.answer, response }]);
-    setLoading(false);
+    setError("");
+    setNormal(null);
+    setAI(null);
+    setSearched(q);
+    setQuery(q);
+
+    try {
+      // Run both searches in parallel
+      const [normal, ai] = await Promise.all([
+        normalSearch(q),
+        aiSearch(q),
+      ]);
+      setNormal(normal);
+      setAI(ai);
+    } catch (err) {
+      setError("Search failed — check your API keys in .env.local");
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 20, height: "calc(100vh - 56px)" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
-      {/* Center — Chat */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Header */}
+      <div>
+        <h2 style={{ color: "#f1f5f9", fontSize: 22, fontWeight: 700, margin: 0 }}>
+          🔬 Search Comparison
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 14, marginTop: 6 }}>
+          See the difference between normal keyword search and AI semantic search
+        </p>
+      </div>
 
-        {/* Stats bar */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
-          {[{ v: "847", l: "Knowledge Items", c: "#7c6af7" }, { v: "124", l: "SOPs Documented", c: "#22d3ee" }, { v: "3", l: "Inspections Due", c: "#f97316" }].map(s => (
-            <Card key={s.l} style={{ textAlign: "center", padding: 16 }}>
-              <div style={{ fontSize: 28, fontWeight: 800, color: s.c }}>{s.v}</div>
-              <div style={{ color: "#94a3b8", fontSize: 13 }}>{s.l}</div>
-            </Card>
-          ))}
+      {/* Search input */}
+      <Card style={{ padding: 16 }}>
+        <div style={{ display: "flex", gap: 10 }}>
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleSearch(query)}
+            placeholder="Try: 'air conditioning making noise' or 'card wont work'..."
+            style={{
+              flex: 1, background: "#0f172a", border: "1px solid #334155",
+              borderRadius: 10, padding: "12px 16px", color: "#f1f5f9", fontSize: 14,
+            }}
+          />
+          <button
+            onClick={() => handleSearch(query)}
+            disabled={loading}
+            style={{
+              background: loading ? "#4c3d9e" : "#7c6af7", color: "#fff",
+              border: "none", borderRadius: 10, padding: "12px 24px",
+              cursor: loading ? "not-allowed" : "pointer", fontWeight: 700, fontSize: 14,
+            }}
+          >
+            {loading ? "Searching..." : "Search"}
+          </button>
         </div>
 
-        {/* Messages */}
-        <Card style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 16, minHeight: 0 }}>
-          {messages.length === 0 && (
-            <div style={{ textAlign: "center", color: "#475569", marginTop: 40 }}>
-              <div style={{ fontSize: 40, marginBottom: 12 }}>✨</div>
-              <div style={{ fontSize: 16, fontWeight: 600, color: "#64748b" }}>Ask anything about your business</div>
-              <div style={{ fontSize: 13, marginTop: 8 }}>Try: "HVAC unit showing E-47 fault" or "fire inspection due"</div>
-            </div>
-          )}
-
-          {messages.map((m, i) => (
-            <div key={i}>
-              {m.role === "user" ? (
-                <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                  <div style={{ background: "#7c6af7", color: "#fff", borderRadius: "12px 12px 2px 12px", padding: "10px 16px", maxWidth: "70%", fontSize: 14 }}>
-                    {m.text}
-                  </div>
-                </div>
-              ) : (
-                <div style={{ background: "#0f172a", borderRadius: 12, padding: 16, border: "1px solid #334155" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-                    <div style={{ color: "#7c6af7", fontWeight: 700, fontSize: 14 }}>✨ AI Assistant</div>
-                    <div style={{ color: "#475569", fontSize: 12 }}>From knowledge base</div>
-                  </div>
-                  <div style={{ color: "#cbd5e1", fontSize: 14, lineHeight: 1.7, marginBottom: m.response?.steps ? 12 : 0 }}>
-                    {m.response?.answer}
-                  </div>
-                  {m.response?.steps && (
-                    <ol style={{ margin: "12px 0", paddingLeft: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
-                      {m.response.steps.map((s, j) => (
-                        <li key={j} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-                          <span style={{ background: "#1e293b", color: "#7c6af7", borderRadius: 6, padding: "2px 8px", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>{j + 1}</span>
-                          <span style={{ color: "#94a3b8", fontSize: 13, lineHeight: 1.6 }}>{s}</span>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                  {m.response?.note && (
-                    <div style={{ background: "#422006", border: "1px solid #92400e", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#fbbf24", marginTop: 12 }}>
-                      ⚠️ {m.response.note}
-                    </div>
-                  )}
-                  {/* Sources */}
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
-                    {m.response?.sources.map(s => (
-                      <span key={s} style={{ background: "#1e293b", color: "#64748b", fontSize: 12, padding: "3px 10px", borderRadius: 6, border: "1px solid #334155" }}>
-                        📎 {s}
-                      </span>
-                    ))}
-                  </div>
-                  {/* Actions */}
-                  <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                    {["👍 Helpful", "✏️ Edit answer", "➕ Add to knowledge", "🔗 Share"].map(a => (
-                      <button key={a} style={{ background: "#1e293b", border: "1px solid #334155", color: "#94a3b8", borderRadius: 8, padding: "5px 12px", cursor: "pointer", fontSize: 12 }}>
-                        {a}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-          {loading && (
-            <div style={{ background: "#0f172a", borderRadius: 12, padding: 16, border: "1px solid #334155", color: "#64748b", fontSize: 14 }}>
-              ✨ Searching knowledge base...
-            </div>
-          )}
-        </Card>
-
-        {/* Suggested questions */}
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {/* Suggested queries */}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          <span style={{ color: "#475569", fontSize: 12, alignSelf: "center" }}>Try:</span>
           {SUGGESTED.map(q => (
-            <button key={q} onClick={() => handleAsk(q)}
-              style={{ background: "#1e293b", border: "1px solid #334155", color: "#94a3b8", borderRadius: 20, padding: "6px 14px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}>
+            <button key={q} onClick={() => handleSearch(q)}
+              style={{
+                background: "#0f172a", border: "1px solid #334155",
+                color: "#94a3b8", borderRadius: 20, padding: "4px 12px",
+                cursor: "pointer", fontSize: 12,
+              }}>
               {q}
             </button>
           ))}
         </div>
+      </Card>
 
-        {/* Input */}
-        <div style={{ display: "flex", gap: 10 }}>
-          <input
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleAsk(input)}
-            placeholder="Ask anything... 'boiler making noise', 'fire inspection due'"
-            style={{ flex: 1, background: "#1e293b", border: "1px solid #334155", borderRadius: 10, padding: "12px 16px", color: "#f1f5f9", fontSize: 14 }}
-          />
-          <button onClick={() => handleAsk(input)}
-            style={{ background: "#7c6af7", color: "#fff", border: "none", borderRadius: 10, padding: "12px 20px", cursor: "pointer", fontWeight: 700 }}>
-            Ask
-          </button>
+      {/* Error */}
+      {error && (
+        <div style={{ background: "#431407", border: "1px solid #92400e", borderRadius: 10, padding: 16, color: "#fbbf24", fontSize: 14 }}>
+          ⚠️ {error}
         </div>
-      </div>
+      )}
 
-      {/* Right panel */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 16, overflowY: "auto" }}>
+      {/* Results — side by side */}
+      {(normalResults !== null || aiResult !== null) && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
 
-        {/* Inspections due */}
-        <Card style={{ padding: 16 }}>
-          <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 13, marginBottom: 12 }}>📋 INSPECTIONS DUE</div>
-          {[
-            { name: "Fire Suppression — Warehouse B", sub: "ABC Fire Protection · Cert expires 15 Mar", days: 12, status: "urgent" },
-            { name: "HVAC System — Building 3",       sub: "CoolTech Services · Last: Jan 2024",        days: 47, status: "upcoming" },
-            { name: "Electrical Safety Certificate",  sub: "Sparks Electrical · 5-year cycle",          days: 91, status: "ok" },
-          ].map(item => (
-            <div key={item.name} style={{ marginBottom: 12 }}>
-              <div style={{ color: "#f1f5f9", fontSize: 13, fontWeight: 600 }}>{item.name}</div>
-              <div style={{ color: "#64748b", fontSize: 11, margin: "2px 0 6px" }}>{item.sub}</div>
-              <div style={{
-                background: item.status === "urgent" ? "#431407" : item.status === "upcoming" ? "#422006" : "#052e16",
-                color: item.status === "urgent" ? "#f97316" : item.status === "upcoming" ? "#facc15" : "#4ade80",
-                borderRadius: 6, padding: "3px 10px", fontSize: 12, fontWeight: 600, display: "inline-block",
-              }}>
-                {item.days} days
+          {/* Left — Normal search */}
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <div style={{ background: "#1e293b", borderRadius: 8, padding: "6px 14px" }}>
+                <span style={{ color: "#64748b", fontSize: 13, fontWeight: 700 }}>
+                  🔤 Normal Keyword Search
+                </span>
               </div>
+              <span style={{ color: "#475569", fontSize: 12 }}>
+                exact word match only
+              </span>
             </div>
-          ))}
-        </Card>
 
-        {/* Recent activity */}
-        <Card style={{ padding: 16 }}>
-          <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 13, marginBottom: 12 }}>⚡ RECENT ACTIVITY</div>
-          {ACTIVITY.map((a, i) => (
-            <div key={i} style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-              <div style={{ width: 28, height: 28, borderRadius: "50%", background: a.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#fff", flexShrink: 0 }}>
-                {a.user[0]}
-              </div>
-              <div>
-                <div style={{ color: "#94a3b8", fontSize: 12, lineHeight: 1.5 }}>
-                  <strong style={{ color: "#f1f5f9" }}>{a.user}</strong> {a.action}
+            <Card style={{ minHeight: 300 }}>
+              {loading && (
+                <div style={{ color: "#475569", textAlign: "center", padding: 40 }}>
+                  Searching...
                 </div>
-                <div style={{ color: "#475569", fontSize: 11, marginTop: 2 }}>{a.time}</div>
-              </div>
-            </div>
-          ))}
-        </Card>
+              )}
+              {!loading && normalResults?.length === 0 && (
+                <div style={{ textAlign: "center", padding: 40 }}>
+                  <div style={{ fontSize: 32, marginBottom: 12 }}>❌</div>
+                  <div style={{ color: "#f97316", fontWeight: 700, marginBottom: 8 }}>
+                    No results found
+                  </div>
+                  <div style={{ color: "#475569", fontSize: 13 }}>
+                    "{searched}" didn't match any exact keywords
+                  </div>
+                </div>
+              )}
+              {!loading && (normalResults ?? []).map((r, i) => (
+                <div key={i} style={{ padding: "12px 0", borderBottom: "1px solid #334155" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <TypeBadge type={r.type} />
+                    <span style={{ color: "#f1f5f9", fontWeight: 600, fontSize: 14 }}>{r.title}</span>
+                  </div>
+                  {r.excerpt && (
+                    <div style={{ color: "#64748b", fontSize: 13, marginLeft: 4 }}>{r.excerpt}</div>
+                  )}
+                </div>
+              ))}
+            </Card>
+          </div>
 
-        {/* Add Knowledge widget */}
-        <Card style={{ padding: 16, background: "#1a1040", border: "1px solid #4c3d9e" }}>
-          <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 14, marginBottom: 6 }}>🪄 Add Knowledge</div>
-          <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 14 }}>
-            Speak, type, or upload a doc — AI turns it into searchable knowledge instantly.
+          {/* Right — AI search */}
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <div style={{ background: "#1e1b4b", border: "1px solid #4c3d9e", borderRadius: 8, padding: "6px 14px" }}>
+                <span style={{ color: "#a78bfa", fontSize: 13, fontWeight: 700 }}>
+                  ✨ AI Semantic Search
+                </span>
+              </div>
+              <span style={{ color: "#475569", fontSize: 12 }}>
+                understands meaning
+              </span>
+            </div>
+
+            <Card style={{ minHeight: 300, border: "1px solid #4c3d9e" }}>
+              {loading && (
+                <div style={{ color: "#475569", textAlign: "center", padding: 40 }}>
+                  AI is thinking...
+                </div>
+              )}
+
+              {!loading && aiResult && (
+                <div>
+                  {/* AI Answer */}
+                  <div style={{ color: "#cbd5e1", fontSize: 14, lineHeight: 1.8, marginBottom: 16, whiteSpace: "pre-wrap" }}>
+                    {aiResult.answer}
+                  </div>
+
+                  {/* Sources with similarity scores */}
+                  {aiResult.sources?.length > 0 && (
+                    <div style={{ borderTop: "1px solid #334155", paddingTop: 14 }}>
+                      <div style={{ color: "#475569", fontSize: 11, fontWeight: 700, marginBottom: 10, textTransform: "uppercase" }}>
+                        Sources Found
+                      </div>
+                      {aiResult.sources.map((s, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <TypeBadge type={s.type} />
+                            <span style={{ color: "#94a3b8", fontSize: 13 }}>{s.title}</span>
+                          </div>
+                          {/* Similarity score bar */}
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div style={{ width: 60, background: "#0f172a", borderRadius: 99, height: 4 }}>
+                              <div style={{ width: `${s.similarity}%`, background: "#7c6af7", borderRadius: 99, height: 4 }} />
+                            </div>
+                            <span style={{ color: "#7c6af7", fontSize: 12, fontWeight: 700, width: 36 }}>
+                              {s.similarity}%
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* No sources found */}
+                  {aiResult.sources?.length === 0 && (
+                    <div style={{ color: "#475569", fontSize: 13, marginTop: 12 }}>
+                      No matching knowledge items found — answer based on general knowledge only.
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            {["🎙️ Voice", "⌨️ Type", "📁 Upload"].map(b => (
-              <button key={b} style={{ flex: 1, background: "#0f172a", border: "1px solid #4c3d9e", color: "#a78bfa", borderRadius: 8, padding: "8px 4px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
-                {b}
-              </button>
-            ))}
+        </div>
+      )}
+
+      {/* Empty state */}
+      {!loading && normalResults === null && aiResult === null && !error && (
+        <Card style={{ textAlign: "center", padding: 60 }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>🔬</div>
+          <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 18, marginBottom: 8 }}>
+            Test the difference
+          </div>
+          <div style={{ color: "#64748b", fontSize: 14, maxWidth: 400, margin: "0 auto" }}>
+            Type a natural language query above and see how AI finds relevant knowledge even when exact keywords don't match
           </div>
         </Card>
-      </div>
+      )}
     </div>
   );
 }
